@@ -35,8 +35,8 @@ from .preparacion_datos import PROCESSED
 SEED = 2025
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 VENTANA = 12                 # meses de historia que ve el modelo (lookback)
-HORIZONTES = (1, 3, 6)       # meses hacia delante a evaluar
-FR_TRAIN, FR_VAL = 0.70, 0.20
+HORIZONTES = (1, 3, 6, 12, 24)   # meses hacia delante a evaluar
+FR_TRAIN, FR_VAL = 0.60, 0.20    # test = 20%, suficiente para h=24 meses
 
 
 # ---------------------------------------------------------------------------
@@ -133,21 +133,22 @@ def construir_red(tipo, k, unidades=20):
     return modelo
 
 
-def _predecir_recursivo(modelo, ventana_ini, k, h):
-    """Predicción a h pasos realimentando la propia salida del modelo.
+def _predecir_recursivo_lote(modelo, ventanas_ini, k, h):
+    """Predicción recursiva a h pasos para un lote de ventanas a la vez.
 
-    Usa la llamada directa modelo(x) en lugar de modelo.predict(), mucho
-    más rápida para muestras individuales al evitar la sobrecarga por
-    lote de Keras.
+    Recibe una matriz (n_ventanas, k) y devuelve el valor a h pasos de
+    cada una. En cada paso realimenta la salida del modelo como última
+    componente de la ventana. Al procesar todas las ventanas juntas, el
+    número de llamadas al modelo pasa de (n_ventanas * h) a solo h.
     """
     import tensorflow as tf
 
-    v = list(ventana_ini)
+    v = np.asarray(ventanas_ini, dtype=np.float32)   # (n, k)
     for _ in range(h):
-        x = tf.constant(np.array(v[-k:])[None, :, None], dtype=tf.float32)
-        y = float(modelo(x, training=False).numpy().ravel()[0])
-        v.append(y)
-    return v[-1]
+        x = tf.constant(v[:, -k:, None], dtype=tf.float32)
+        y = modelo(x, training=False).numpy().reshape(-1, 1)   # (n, 1)
+        v = np.concatenate([v, y], axis=1)
+    return v[:, -1]
 
 
 def red_sobre_panel(panel, tipo, k, horizontes=HORIZONTES, epocas=150):
@@ -186,15 +187,21 @@ def red_sobre_panel(panel, tipo, k, horizontes=HORIZONTES, epocas=150):
                 y_hat = modelo.predict(X[..., None], verbose=0).ravel()
                 res[h][distrito] = (e.invertir(y), e.invertir(y_hat))
             else:
-                # Horizontes mayores: predicción recursiva ventana a ventana.
-                reales, preds = [], []
+                # Horizontes mayores: predicción recursiva vectorizada
+                # sobre todas las ventanas del tramo de prueba a la vez.
+                inis, reales = [], []
                 for t in range(i_va, len(s) - h + 1):
                     if t - k < 0:
                         continue
-                    preds.append(_predecir_recursivo(modelo, s[t - k:t], k, h))
+                    inis.append(s[t - k:t])
                     reales.append(s[t + h - 1])
-                res[h][distrito] = (e.invertir(np.array(reales)),
-                                    e.invertir(np.array(preds)))
+                if inis:
+                    preds = _predecir_recursivo_lote(
+                        modelo, np.array(inis), k, h)
+                    res[h][distrito] = (e.invertir(np.array(reales)),
+                                        e.invertir(preds))
+                else:
+                    res[h][distrito] = (np.array([]), np.array([]))
     return res
 
 
@@ -257,6 +264,9 @@ def cargar_panel(dataset="madrid"):
 def agregar(res_h):
     tablas = [resumen(y, yh, con_r2=False)
               for y, yh in res_h.values() if len(y)]
+    if not tablas:
+        return {"RMSE": float("nan"), "MAE": float("nan"),
+                "MAPE": float("nan")}
     return {m: float(np.mean([t[m] for t in tablas])) for m in tablas[0]}
 
 

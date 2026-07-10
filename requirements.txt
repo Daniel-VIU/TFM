@@ -1,0 +1,8 @@
+pandas>=2.0
+numpy>=1.26
+scikit-learn>=1.4
+statsmodels>=0.14
+tensorflow-cpu>=2.16
+openpyxl>=3.1
+pyarrow>=15
+matplotlib>=3.8

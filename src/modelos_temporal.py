@@ -234,10 +234,24 @@ def hibrido_arima_rf(res_arima, residuos, horizontes=HORIZONTES, k=6):
 # Orquestación y agregación
 # ---------------------------------------------------------------------------
 
-def cargar_panel():
-    df = pd.read_csv(PROCESSED / "panel_distritos.csv", parse_dates=["fecha"])
-    return {d: g.sort_values("fecha")["precio_m2"].to_numpy(float)
-            for d, g in df.groupby("distrito")}
+def cargar_panel(dataset="madrid"):
+    """Carga el panel elegido como diccionario {serie: array de valores}.
+
+    dataset="madrid": panel de precio (eur/m2) por distrito.
+    dataset="case_shiller": índice mensual por ciudad de EE. UU.
+    """
+    if dataset == "madrid":
+        df = pd.read_csv(PROCESSED / "panel_distritos.csv",
+                         parse_dates=["fecha"])
+        col_serie, col_valor = "distrito", "precio_m2"
+    elif dataset == "case_shiller":
+        df = pd.read_csv(PROCESSED / "panel_case_shiller.csv",
+                         parse_dates=["fecha"])
+        col_serie, col_valor = "serie", "indice"
+    else:
+        raise ValueError(f"dataset desconocido: {dataset}")
+    return {s: g.sort_values("fecha")[col_valor].to_numpy(float)
+            for s, g in df.groupby(col_serie)}
 
 
 def agregar(res_h):
@@ -251,14 +265,15 @@ def mape_por_distrito(res_h):
     return {d: mape(y, yh) for d, (y, yh) in res_h.items() if len(y)}
 
 
-def main(rapido=False, k=VENTANA):
+def main(rapido=False, k=VENTANA, dataset="madrid"):
     np.random.seed(SEED)
-    panel = cargar_panel()
+    panel = cargar_panel(dataset)
     if rapido:
         panel = {d: panel[d] for d in list(panel)[:3]}
     epocas = 15 if rapido else 150
+    print(f"Dataset: {dataset}  |  {len(panel)} series")
 
-    print("ARIMA por distrito...")
+    print("ARIMA por serie...")
     res_arima, residuos = arima_por_distrito(panel)
     print("LSTM sobre el panel...")
     res_lstm = red_sobre_panel(panel, "lstm", k, epocas=epocas)
@@ -275,19 +290,20 @@ def main(rapido=False, k=VENTANA):
         for h in HORIZONTES:
             filas.append({"Modelo": nombre, "Horizonte": h, **agregar(res[h])})
     tabla = pd.DataFrame(filas).set_index(["Modelo", "Horizonte"]).round(3)
-    print("\nPromedio sobre los distritos:")
+    print("\nPromedio sobre las series:")
     print(tabla)
 
-    por_dist = pd.DataFrame({
+    por_serie = pd.DataFrame({
         nombre: mape_por_distrito(res[1]) for nombre, res in modelos.items()
     }).round(3)
-    por_dist.index.name = "Distrito"
-    por_dist = por_dist.sort_values("ARIMA")
+    por_serie.index.name = "Serie"
+    por_serie = por_serie.sort_values("ARIMA")
 
     RESULTS.mkdir(exist_ok=True)
-    tabla.to_csv(RESULTS / "temporal_metricas.csv")
-    por_dist.to_csv(RESULTS / "temporal_por_distrito.csv")
-    print(f"\nMétricas por distrito guardadas ({len(por_dist)} distritos).")
+    sufijo = "" if dataset == "madrid" else f"_{dataset}"
+    tabla.to_csv(RESULTS / f"temporal_metricas{sufijo}.csv")
+    por_serie.to_csv(RESULTS / f"temporal_por_serie{sufijo}.csv")
+    print(f"\nMétricas por serie guardadas ({len(por_serie)} series).")
     return tabla
 
 
@@ -295,5 +311,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--rapido", action="store_true")
     ap.add_argument("--ventana", type=int, default=VENTANA)
+    ap.add_argument("--dataset", choices=["madrid", "case_shiller"],
+                    default="madrid")
     args = ap.parse_args()
-    main(rapido=args.rapido, k=args.ventana)
+    main(rapido=args.rapido, k=args.ventana, dataset=args.dataset)

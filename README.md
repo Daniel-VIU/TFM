@@ -58,6 +58,12 @@ python -m src.construir_espaciotemporal
 python -m src.modelos_espaciotemporal
 ```
 
+Los modelos temporales se evalúan en cinco horizontes de predicción
+(1, 3, 6, 12 y 24 meses), lo que permite estudiar cómo se degrada la
+precisión de cada modelo al alejar el horizonte. La partición temporal
+es 60/20/20 (entrenamiento/validación/prueba), de modo que el tramo de
+prueba sea suficiente para evaluar el horizonte de 24 meses.
+
 Añadir `--rapido` a cualquier módulo de modelos para una comprobación
 sobre una submuestra. Las tablas de métricas quedan en `results/` (los
 ficheros del caso Case-Shiller llevan el sufijo `_case_shiller`). Las

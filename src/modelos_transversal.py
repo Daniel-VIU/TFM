@@ -3,49 +3,69 @@ Formulación transversal: predicción del precio del anuncio.
 
 Compara regresión lineal múltiple (línea base), random forest y
 gradient boosting sobre el conjunto idealista18 depurado, con:
-- partición aleatoria 80/20 (semilla fija),
+- variable objetivo en escala logarítmica (log del precio), que corrige
+  la asimetría de la distribución de precios y evita que los inmuebles de
+  precio extremo dominen el error;
+- partición aleatoria 80/20 (semilla fija);
 - selección de hiperparámetros por validación cruzada de 5 particiones
-  dentro del tramo de entrenamiento,
-- evaluación final única sobre el tramo de prueba.
+  dentro del tramo de entrenamiento;
+- evaluación final única sobre el tramo de prueba, con métricas dadas
+  tanto en escala logarítmica como en euros (revertidas con exp);
+- test de robustez del mejor modelo sobre varias semillas de partición.
 
 Uso:
     python -m src.modelos_transversal [--rapido]
-La opción --rapido reduce las mallas de hiperparámetros y submuestrea
-el conjunto para una ejecución de comprobación.
 """
 
 import argparse
-import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import (
-    GradientBoostingRegressor,
-    RandomForestRegressor,
-)
+from sklearn.ensemble import (GradientBoostingRegressor,
+                              RandomForestRegressor)
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from .metricas import resumen
+from .metricas import rmse, mae, mape, r2
 from .preparacion_datos import BINARIAS, CONTINUAS, PROCESSED, RESPUESTA
 
 SEED = 2025
+SEMILLAS_ROBUSTEZ = [2025, 7, 123, 2024, 99]
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 
 PREDICTORES = CONTINUAS + BINARIAS
 
 
-def cargar() -> tuple[pd.DataFrame, pd.Series]:
+def cargar():
     df = pd.read_parquet(PROCESSED / "transversal.parquet")
     df = df.dropna(subset=PREDICTORES + [RESPUESTA])
+    df = df[df[RESPUESTA] > 0]                 # log exige precio positivo
     return df[PREDICTORES], df[RESPUESTA]
 
 
-def construir_modelos(rapido: bool) -> dict:
-    """Modelos y mallas de hiperparámetros de la memoria."""
+def metricas_dobles(y_log_real, y_log_pred):
+    """Métricas en escala log y en euros (revertidas con exp).
+
+    El modelo se entrena y predice en log(precio); las métricas en euros
+    se obtienen aplicando la exponencial a valores reales y predichos, lo
+    que las hace directamente interpretables.
+    """
+    y_eur = np.exp(y_log_real)
+    yhat_eur = np.exp(y_log_pred)
+    return {
+        "R2_log": r2(y_log_real, y_log_pred),
+        "RMSE_log": rmse(y_log_real, y_log_pred),
+        "MAE_eur": mae(y_eur, yhat_eur),
+        "RMSE_eur": rmse(y_eur, yhat_eur),
+        "MAPE": mape(y_eur, yhat_eur),
+    }
+
+
+def construir_modelos(rapido):
+    """Modelos y mallas de hiperparámetros."""
     if rapido:
         malla_rf = {"n_estimators": [100], "max_features": ["sqrt"]}
         malla_gb = {"n_estimators": [100], "learning_rate": [0.1],
@@ -61,9 +81,6 @@ def construir_modelos(rapido: bool) -> dict:
             "max_depth": [3, 5],
         }
     return {
-        # La regresión se entrena sobre variables estandarizadas; los
-        # árboles, sobre las variables originales (invariantes a
-        # transformaciones monótonas).
         "Regresion lineal": (
             Pipeline([("esc", StandardScaler()),
                       ("mod", LinearRegression())]),
@@ -80,37 +97,66 @@ def construir_modelos(rapido: bool) -> dict:
     }
 
 
-def main(rapido: bool = False) -> pd.DataFrame:
+def ajustar(nombre, modelo, malla, X_tr, y_tr):
+    """Ajusta un modelo, con GridSearchCV si tiene malla."""
+    if malla:
+        busqueda = GridSearchCV(
+            modelo, malla, cv=5,
+            scoring="neg_root_mean_squared_error", n_jobs=-1,
+        )
+        busqueda.fit(X_tr, y_tr)
+        return busqueda.best_estimator_, busqueda.best_params_
+    return modelo.fit(X_tr, y_tr), {}
+
+
+def main(rapido=False):
     X, y = cargar()
     if rapido:
         X, y = X.iloc[:15000], y.iloc[:15000]
+    y_log = np.log(y)                          # objetivo en escala log
 
     X_tr, X_te, y_tr, y_te = train_test_split(
-        X, y, test_size=0.2, random_state=SEED
+        X, y_log, test_size=0.2, random_state=SEED
     )
     print(f"Entrenamiento: {len(X_tr)}  |  Prueba: {len(X_te)}")
 
-    filas = []
+    filas, mejores = [], {}
     for nombre, (modelo, malla) in construir_modelos(rapido).items():
-        if malla:
-            busqueda = GridSearchCV(
-                modelo, malla, cv=5,
-                scoring="neg_root_mean_squared_error", n_jobs=-1,
-            )
-            busqueda.fit(X_tr, y_tr)
-            mejor = busqueda.best_estimator_
-            print(f"{nombre}: mejores hiperparámetros "
-                  f"{busqueda.best_params_}")
-        else:
-            mejor = modelo.fit(X_tr, y_tr)
-        y_hat = mejor.predict(X_te)
-        filas.append({"Modelo": nombre, **resumen(y_te, y_hat)})
+        ajustado, params = ajustar(nombre, modelo, malla, X_tr, y_tr)
+        mejores[nombre] = (ajustado, params)
+        if params:
+            print(f"{nombre}: {params}")
+        y_hat = ajustado.predict(X_te)
+        filas.append({"Modelo": nombre, **metricas_dobles(y_te, y_hat)})
 
-    tabla = pd.DataFrame(filas).set_index("Modelo").round(3)
-    print("\n", tabla, sep="")
+    tabla = pd.DataFrame(filas).set_index("Modelo").round(4)
+    print("\nComparativa (objetivo en log-precio):")
+    print(tabla)
 
     RESULTS.mkdir(exist_ok=True)
     tabla.to_csv(RESULTS / "transversal_metricas.csv")
+
+    # Test de robustez del mejor modelo (menor RMSE en euros).
+    mejor_nombre = tabla["RMSE_eur"].idxmin()
+    print(f"\nTest de robustez de '{mejor_nombre}' sobre "
+          f"{len(SEMILLAS_ROBUSTEZ)} semillas de partición:")
+    modelo_base, params = mejores[mejor_nombre]
+    filas_rob = []
+    for s in SEMILLAS_ROBUSTEZ:
+        Xtr, Xte, ytr, yte = train_test_split(
+            X, y_log, test_size=0.2, random_state=s)
+        m = modelo_base.__class__(**{**modelo_base.get_params()})
+        m.fit(Xtr, ytr)
+        d = metricas_dobles(yte, m.predict(Xte))
+        filas_rob.append({"Semilla": s, "R2_log": round(d["R2_log"], 4),
+                          "MAE_eur": round(d["MAE_eur"], 1),
+                          "RMSE_eur": round(d["RMSE_eur"], 1)})
+    rob = pd.DataFrame(filas_rob).set_index("Semilla")
+    media = rob["R2_log"].mean()
+    desv = rob["R2_log"].std()
+    print(rob)
+    print(f"R2_log medio: {media:.4f} ± {desv:.4f}")
+    rob.to_csv(RESULTS / "transversal_robustez.csv")
     return tabla
 
 

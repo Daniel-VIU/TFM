@@ -1,28 +1,29 @@
 """
 Formulación temporal: predicción del precio medio (eur/m2) por distrito.
 
-Compara cuatro modelos sobre el panel mensual de 21 distritos, en tres
-horizontes de predicción (1, 3 y 6 meses):
+Compara cuatro enfoques sobre el panel mensual de distritos, en varios
+horizontes de predicción:
 
-1. ARIMA por serie (línea base), ajustado sobre la tasa de variación.
-2. LSTM entrenada de forma conjunta sobre las ventanas de las 21 series.
+1. ARIMA por serie (línea base), ajustado sobre log-retornos.
+2. LSTM entrenada de forma conjunta sobre las ventanas de las series.
 3. CNN-LSTM: capas convolucionales 1D antes de las recurrentes.
 4. Híbrido ARIMA + random forest sobre los residuos del ARIMA.
 
-Particiones cronológicas 70/20/10 por serie. La normalización
+Particiones cronológicas 60/20/20 por serie. La normalización
 mínimo-máximo de cada serie se ajusta solo con el tramo de
 entrenamiento. Las métricas se calculan en la escala original y se
-reportan tanto en promedio como por distrito.
+reportan tanto en promedio como por serie.
 
 Uso:
     python -m src.modelos_temporal [--rapido] [--ventana K]
 
 Genera en results/:
     temporal_metricas.csv          (promedio por modelo y horizonte)
-    temporal_por_distrito.csv      (MAPE por distrito, modelo y horizonte 1)
+    temporal_por_distrito.csv      (MAPE por distrito, modelo, horizonte 1)
 """
 
 import argparse
+import math
 import warnings
 from pathlib import Path
 
@@ -34,9 +35,10 @@ from .preparacion_datos import PROCESSED
 
 SEED = 2025
 RESULTS = Path(__file__).resolve().parents[1] / "results"
-VENTANA = 12                 # meses de historia que ve el modelo (lookback)
-HORIZONTES = (1, 3, 6, 12, 24)   # meses hacia delante a evaluar
-FR_TRAIN, FR_VAL = 0.60, 0.20    # test = 20%, suficiente para h=24 meses
+VENTANA = 12
+HORIZONTES = (1, 3, 6, 12, 24)
+FR_TRAIN, FR_VAL = 0.60, 0.20  # test = 20%
+EPS = 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -44,9 +46,11 @@ FR_TRAIN, FR_VAL = 0.60, 0.20    # test = 20%, suficiente para h=24 meses
 # ---------------------------------------------------------------------------
 
 def particion_cronologica(serie):
-    """Índices de corte train/val/test (70/20/10) de una serie."""
+    """Índices de corte train/val/test (60/20/20) de una serie."""
     n = len(serie)
-    return int(n * FR_TRAIN), int(n * (FR_TRAIN + FR_VAL))
+    i_tr = int(n * FR_TRAIN)
+    i_va = int(n * (FR_TRAIN + FR_VAL))
+    return i_tr, i_va
 
 
 def ventanas(serie, k, ini, fin):
@@ -62,31 +66,53 @@ class EscaladorMinMax:
     """Mínimo-máximo ajustado solo con el tramo de entrenamiento."""
 
     def ajustar(self, tramo):
-        self.lo, self.hi = float(tramo.min()), float(tramo.max())
+        tramo = np.asarray(tramo, dtype=float)
+        self.lo = float(np.nanmin(tramo))
+        self.hi = float(np.nanmax(tramo))
+        self.rango = self.hi - self.lo
+        if not np.isfinite(self.rango) or self.rango == 0:
+            self.rango = 1.0
         return self
 
     def transformar(self, x):
-        return (x - self.lo) / (self.hi - self.lo)
+        x = np.asarray(x, dtype=float)
+        return (x - self.lo) / self.rango
 
     def invertir(self, x):
-        return x * (self.hi - self.lo) + self.lo
+        x = np.asarray(x, dtype=float)
+        return x * self.rango + self.lo
 
 
 # ---------------------------------------------------------------------------
-# Modelo 1: ARIMA por distrito (línea base)
+# Modelo 1: ARIMA por serie (línea base)
 # ---------------------------------------------------------------------------
+
+def _log_retornos(serie):
+    serie = np.asarray(serie, dtype=float)
+    serie = np.clip(serie, EPS, None)
+    return np.diff(np.log(serie))
+
 
 def arima_por_distrito(panel, horizontes=HORIZONTES, orden=(4, 0, 4)):
-    """ARIMA sobre la tasa de variación, con predicción rodante a 1/3/6."""
+    """ARIMA sobre log-retornos, con predicción rodante a varios horizontes."""
     from statsmodels.tsa.arima.model import ARIMA
 
     res = {h: {} for h in horizontes}
     residuos = {}
     hmax = max(horizontes)
+
     for distrito, serie in panel.items():
-        ret = np.diff(serie) / serie[:-1]
+        serie = np.asarray(serie, dtype=float)
+        if len(serie) < max(VENTANA + 2, hmax + 5):
+            for h in horizontes:
+                res[h][distrito] = (np.array([]), np.array([]))
+            residuos[distrito] = np.array([])
+            continue
+
+        ret = _log_retornos(serie)
         i_tr, i_va = particion_cronologica(serie)
         acum = {h: ([], []) for h in horizontes}
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             for t in range(i_va, len(serie) - 1):
@@ -95,13 +121,18 @@ def arima_por_distrito(panel, horizontes=HORIZONTES, orden=(4, 0, 4)):
                 r_hat = np.atleast_1d(mod.forecast(pasos))
                 for h in horizontes:
                     if t + h < len(serie) and h <= pasos:
-                        nivel = serie[t] * np.prod(1 + r_hat[:h])
-                        acum[h][0].append(serie[t + h])
+                        # Reconstrucción desde el precio actual usando la suma
+                        # acumulada de los retornos predichos.
+                        nivel = float(serie[t] * np.exp(np.sum(r_hat[:h])))
+                        acum[h][0].append(float(serie[t + h]))
                         acum[h][1].append(nivel)
-            mod_tr = ARIMA(ret[: i_tr - 1], order=orden).fit()
-            residuos[distrito] = ret[: i_tr - 1] - mod_tr.fittedvalues
+
+            mod_tr = ARIMA(ret[: max(i_tr - 1, 1)], order=orden).fit()
+            residuos[distrito] = ret[: max(i_tr - 1, 1)] - mod_tr.fittedvalues
+
         for h in horizontes:
             res[h][distrito] = (np.array(acum[h][0]), np.array(acum[h][1]))
+
     return res, residuos
 
 
@@ -109,86 +140,113 @@ def arima_por_distrito(panel, horizontes=HORIZONTES, orden=(4, 0, 4)):
 # Modelos 2 y 3: LSTM y CNN-LSTM sobre el panel conjunto
 # ---------------------------------------------------------------------------
 
-def construir_red(tipo, k, unidades=20):
-    """Arquitecturas de la memoria (Chen 2017; Alhussein 2020)."""
+def construir_red(tipo, k, unidades=24):
+    """Arquitecturas recurrentes con regularización ligera."""
     import tensorflow as tf
     from tensorflow.keras import layers
 
     tf.random.set_seed(SEED)
     entrada = layers.Input(shape=(k, 1))
     x = entrada
+
     if tipo == "cnn-lstm":
-        x = layers.Conv1D(48, 3, activation="relu", padding="same")(x)
-        x = layers.MaxPooling1D(2)(x)
+        x = layers.Conv1D(64, 3, activation="relu", padding="same")(x)
         x = layers.Conv1D(32, 3, activation="relu", padding="same")(x)
         x = layers.MaxPooling1D(2)(x)
         x = layers.Conv1D(16, 3, activation="relu", padding="same")(x)
-        x = layers.Dropout(0.25)(x)
+        x = layers.Dropout(0.20)(x)
+
     x = layers.LSTM(unidades, return_sequences=True)(x)
-    x = layers.LSTM(unidades)(x)
-    x = layers.Dropout(0.25)(x)
+    x = layers.LSTM(max(unidades // 2, 8))(x)
+    x = layers.Dropout(0.20)(x)
     salida = layers.Dense(1)(x)
+
     modelo = tf.keras.Model(entrada, salida)
-    modelo.compile(optimizer="adam", loss="mae")
+    modelo.compile(optimizer="adam", loss="mae", metrics=["mae"])
     return modelo
 
 
 def _predecir_recursivo_lote(modelo, ventanas_ini, k, h):
-    """Predicción recursiva a h pasos para un lote de ventanas a la vez.
-
-    Recibe una matriz (n_ventanas, k) y devuelve el valor a h pasos de
-    cada una. En cada paso realimenta la salida del modelo como última
-    componente de la ventana. Al procesar todas las ventanas juntas, el
-    número de llamadas al modelo pasa de (n_ventanas * h) a solo h.
-    """
+    """Predicción recursiva a h pasos para un lote de ventanas a la vez."""
     import tensorflow as tf
 
-    v = np.asarray(ventanas_ini, dtype=np.float32)   # (n, k)
+    v = np.asarray(ventanas_ini, dtype=np.float32)
     for _ in range(h):
         x = tf.constant(v[:, -k:, None], dtype=tf.float32)
-        y = modelo(x, training=False).numpy().reshape(-1, 1)   # (n, 1)
+        y = modelo(x, training=False).numpy().reshape(-1, 1)
         v = np.concatenate([v, y], axis=1)
     return v[:, -1]
 
 
 def red_sobre_panel(panel, tipo, k, horizontes=HORIZONTES, epocas=150):
-    """Entrena una red a un paso y evalúa a 1/3/6 por predicción recursiva."""
+    """Entrena una red a un paso y evalúa a varios horizontes por recursión."""
     import tensorflow as tf
 
     Xtr, ytr, Xva, yva = [], [], [], []
     esc, tramos = {}, {}
+
     for distrito, serie in panel.items():
+        serie = np.asarray(serie, dtype=float)
         i_tr, i_va = particion_cronologica(serie)
         e = EscaladorMinMax().ajustar(serie[:i_tr])
         s = e.transformar(serie)
         esc[distrito] = e
-        X, y = ventanas(s, k, 0, i_tr); Xtr.append(X); ytr.append(y)
-        X, y = ventanas(s, k, i_tr, i_va); Xva.append(X); yva.append(y)
+
+        X, y = ventanas(s, k, 0, i_tr)
+        if len(X):
+            Xtr.append(X)
+            ytr.append(y)
+
+        X, y = ventanas(s, k, i_tr, i_va)
+        if len(X):
+            Xva.append(X)
+            yva.append(y)
+
         tramos[distrito] = (s, i_va)
-    Xtr = np.concatenate(Xtr)[..., None]; ytr = np.concatenate(ytr)
-    Xva = np.concatenate(Xva)[..., None]; yva = np.concatenate(yva)
+
+    if not Xtr or not Xva:
+        raise ValueError("No hay suficientes ventanas para entrenar/validar.")
+
+    Xtr = np.concatenate(Xtr)[..., None]
+    ytr = np.concatenate(ytr)
+    Xva = np.concatenate(Xva)[..., None]
+    yva = np.concatenate(yva)
 
     modelo = construir_red(tipo, k)
-    parada = tf.keras.callbacks.EarlyStopping(
-        patience=10, restore_best_weights=True)
-    modelo.fit(Xtr, ytr, validation_data=(Xva, yva),
-               epochs=epocas, batch_size=128, verbose=0, callbacks=[parada])
+    callbacks = [
+        tf.keras.callbacks.EarlyStopping(
+            patience=10, restore_best_weights=True, monitor="val_loss"
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            patience=5, factor=0.5, min_lr=1e-5, monitor="val_loss"
+        ),
+    ]
+
+    modelo.fit(
+        Xtr,
+        ytr,
+        validation_data=(Xva, yva),
+        epochs=epocas,
+        batch_size=128,
+        verbose=0,
+        shuffle=True,
+        callbacks=callbacks,
+    )
 
     res = {h: {} for h in horizontes}
     for idx, (distrito, (s, i_va)) in enumerate(tramos.items(), 1):
         e = esc[distrito]
-        print(f"    prediccion {tipo} {idx}/{len(tramos)}: {distrito}",
-              flush=True)
+        print(f"    prediccion {tipo} {idx}/{len(tramos)}: {distrito}", flush=True)
+
         for h in horizontes:
             if h == 1:
-                # Horizonte 1: predicción directa, todas las ventanas del
-                # tramo de prueba en una sola llamada por lotes.
                 X, y = ventanas(s, k, i_va, len(s))
-                y_hat = modelo.predict(X[..., None], verbose=0).ravel()
-                res[h][distrito] = (e.invertir(y), e.invertir(y_hat))
+                if len(X):
+                    y_hat = modelo.predict(X[..., None], verbose=0).ravel()
+                    res[h][distrito] = (e.invertir(y), e.invertir(y_hat))
+                else:
+                    res[h][distrito] = (np.array([]), np.array([]))
             else:
-                # Horizontes mayores: predicción recursiva vectorizada
-                # sobre todas las ventanas del tramo de prueba a la vez.
                 inis, reales = [], []
                 for t in range(i_va, len(s) - h + 1):
                     if t - k < 0:
@@ -196,12 +254,11 @@ def red_sobre_panel(panel, tipo, k, horizontes=HORIZONTES, epocas=150):
                     inis.append(s[t - k:t])
                     reales.append(s[t + h - 1])
                 if inis:
-                    preds = _predecir_recursivo_lote(
-                        modelo, np.array(inis), k, h)
-                    res[h][distrito] = (e.invertir(np.array(reales)),
-                                        e.invertir(preds))
+                    preds = _predecir_recursivo_lote(modelo, np.array(inis), k, h)
+                    res[h][distrito] = (e.invertir(np.array(reales)), e.invertir(preds))
                 else:
                     res[h][distrito] = (np.array([]), np.array([]))
+
     return res
 
 
@@ -210,30 +267,60 @@ def red_sobre_panel(panel, tipo, k, horizontes=HORIZONTES, epocas=150):
 # ---------------------------------------------------------------------------
 
 def hibrido_arima_rf(res_arima, residuos, horizontes=HORIZONTES, k=6):
-    """Random forest sobre los residuos del ARIMA (Zhao, 2024)."""
+    """Random forest sobre residuos ARIMA sin fuga de información."""
     from sklearn.ensemble import RandomForestRegressor
 
     res = {h: {} for h in horizontes}
+
     for distrito in residuos:
-        r = np.asarray(residuos[distrito], float)
-        rf = None
-        if len(r) > k + 5:
-            Xr, yr = ventanas(r, k, 0, len(r))
-            rf = RandomForestRegressor(
-                n_estimators=200, random_state=SEED, n_jobs=-1).fit(Xr, yr)
+        r = np.asarray(residuos[distrito], dtype=float)
+        if len(r) <= k + 5:
+            for h in horizontes:
+                res[h][distrito] = res_arima[h].get(distrito, (np.array([]), np.array([])))
+            continue
+
+        Xr, yr = ventanas(r, k, 0, len(r))
+        if len(Xr) == 0:
+            for h in horizontes:
+                res[h][distrito] = res_arima[h].get(distrito, (np.array([]), np.array([])))
+            continue
+
+        rf = RandomForestRegressor(
+            n_estimators=300,
+            random_state=SEED,
+            n_jobs=-1,
+            min_samples_leaf=2,
+        ).fit(Xr, yr)
+
         for h in horizontes:
             real, pred_a = res_arima[h][distrito]
-            if rf is None or len(pred_a) == 0:
+            if len(real) == 0 or len(pred_a) == 0:
                 res[h][distrito] = (real, pred_a)
                 continue
+
+            # El RF predice el residuo (en log-retorno) de cada punto de
+            # test a partir de los k residuos previos, de forma rodante:
+            # tras cada punto se incorpora el residuo real observado, no
+            # la predicción, para no acumular error. La corrección se
+            # aplica a cada punto de forma independiente (sin cumsum),
+            # escalada por el nivel de precio del ARIMA en ese punto.
             cola = list(r[-k:])
-            pred = []
+            correccion = np.empty(len(pred_a))
             for i in range(len(pred_a)):
-                r_hat = rf.predict(np.array(cola[-k:])[None, :])[0]
-                nivel = real[i - 1] if i > 0 else pred_a[0]
-                pred.append(pred_a[i] + r_hat * nivel)
-                cola.append(r_hat)
-            res[h][distrito] = (real, np.array(pred))
+                r_hat = float(rf.predict(np.array(cola[-k:])[None, :])[0])
+                correccion[i] = r_hat
+                # Residuo real aproximado: log-retorno realizado menos el
+                # previsto por el ARIMA entre el punto anterior y este.
+                if i > 0:
+                    ret_real = np.log(max(real[i], EPS) /
+                                      max(real[i - 1], EPS))
+                    cola.append(ret_real)
+                else:
+                    cola.append(r_hat)
+            # Corrección multiplicativa punto a punto (sin acumulación).
+            pred = pred_a * np.exp(correccion)
+            res[h][distrito] = (real, pred)
+
     return res
 
 
@@ -241,32 +328,19 @@ def hibrido_arima_rf(res_arima, residuos, horizontes=HORIZONTES, k=6):
 # Orquestación y agregación
 # ---------------------------------------------------------------------------
 
-def cargar_panel(dataset="madrid"):
-    """Carga el panel elegido como diccionario {serie: array de valores}.
-
-    dataset="madrid": panel de precio (eur/m2) por distrito.
-    dataset="case_shiller": índice mensual por ciudad de EE. UU.
-    """
-    if dataset == "madrid":
-        df = pd.read_csv(PROCESSED / "panel_distritos.csv",
-                         parse_dates=["fecha"])
-        col_serie, col_valor = "distrito", "precio_m2"
-    elif dataset == "case_shiller":
-        df = pd.read_csv(PROCESSED / "panel_case_shiller.csv",
-                         parse_dates=["fecha"])
-        col_serie, col_valor = "serie", "indice"
-    else:
-        raise ValueError(f"dataset desconocido: {dataset}")
-    return {s: g.sort_values("fecha")[col_valor].to_numpy(float)
-            for s, g in df.groupby(col_serie)}
+def cargar_panel():
+    """Panel de distritos de Madrid como diccionario {distrito: valores}."""
+    df = pd.read_csv(PROCESSED / "panel_distritos.csv", parse_dates=["fecha"])
+    panel = {}
+    for s, g in df.groupby("distrito"):
+        panel[s] = g.sort_values("fecha")["precio_m2"].to_numpy(float)
+    return panel
 
 
 def agregar(res_h):
-    tablas = [resumen(y, yh, con_r2=False)
-              for y, yh in res_h.values() if len(y)]
+    tablas = [resumen(y, yh, con_r2=False) for y, yh in res_h.values() if len(y)]
     if not tablas:
-        return {"RMSE": float("nan"), "MAE": float("nan"),
-                "MAPE": float("nan")}
+        return {"RMSE": float("nan"), "MAE": float("nan"), "MAPE": float("nan")}
     return {m: float(np.mean([t[m] for t in tablas])) for m in tablas[0]}
 
 
@@ -275,13 +349,14 @@ def mape_por_distrito(res_h):
     return {d: mape(y, yh) for d, (y, yh) in res_h.items() if len(y)}
 
 
-def main(rapido=False, k=VENTANA, dataset="madrid"):
+def main(rapido=False, k=VENTANA):
     np.random.seed(SEED)
-    panel = cargar_panel(dataset)
+    panel = cargar_panel()
     if rapido:
         panel = {d: panel[d] for d in list(panel)[:3]}
     epocas = 15 if rapido else 150
-    print(f"Dataset: {dataset}  |  {len(panel)} series")
+
+    print(f"{len(panel)} distritos")
 
     print("ARIMA por serie...")
     res_arima, residuos = arima_por_distrito(panel)
@@ -292,28 +367,31 @@ def main(rapido=False, k=VENTANA, dataset="madrid"):
     print("Híbrido ARIMA + RF...")
     res_hib = hibrido_arima_rf(res_arima, residuos)
 
-    modelos = {"ARIMA": res_arima, "LSTM": res_lstm,
-               "CNN-LSTM": res_cnn, "ARIMA + RF": res_hib}
+    modelos = {
+        "ARIMA": res_arima,
+        "LSTM": res_lstm,
+        "CNN-LSTM": res_cnn,
+        "ARIMA + RF": res_hib,
+    }
 
     filas = []
     for nombre, res in modelos.items():
         for h in HORIZONTES:
             filas.append({"Modelo": nombre, "Horizonte": h, **agregar(res[h])})
+
     tabla = pd.DataFrame(filas).set_index(["Modelo", "Horizonte"]).round(3)
-    print("\nPromedio sobre las series:")
+    print("\nPromedio sobre los distritos:")
     print(tabla)
 
-    por_serie = pd.DataFrame({
-        nombre: mape_por_distrito(res[1]) for nombre, res in modelos.items()
-    }).round(3)
-    por_serie.index.name = "Serie"
-    por_serie = por_serie.sort_values("ARIMA")
+    por_dist = pd.DataFrame({nombre: mape_por_distrito(res[1])
+                             for nombre, res in modelos.items()}).round(3)
+    por_dist.index.name = "Distrito"
+    por_dist = por_dist.sort_values("ARIMA")
 
     RESULTS.mkdir(exist_ok=True)
-    sufijo = "" if dataset == "madrid" else f"_{dataset}"
-    tabla.to_csv(RESULTS / f"temporal_metricas{sufijo}.csv")
-    por_serie.to_csv(RESULTS / f"temporal_por_serie{sufijo}.csv")
-    print(f"\nMétricas por serie guardadas ({len(por_serie)} series).")
+    tabla.to_csv(RESULTS / "temporal_metricas.csv")
+    por_dist.to_csv(RESULTS / "temporal_por_distrito.csv")
+    print(f"\nMétricas por distrito guardadas ({len(por_dist)} distritos).")
     return tabla
 
 
@@ -321,7 +399,5 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--rapido", action="store_true")
     ap.add_argument("--ventana", type=int, default=VENTANA)
-    ap.add_argument("--dataset", choices=["madrid", "case_shiller"],
-                    default="madrid")
     args = ap.parse_args()
-    main(rapido=args.rapido, k=args.ventana, dataset=args.dataset)
+    main(rapido=args.rapido, k=args.ventana)

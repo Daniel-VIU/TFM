@@ -15,7 +15,7 @@ Series Temporales"*.
     ├── preparacion_datos.py    # limpieza idealista18 y panel de distritos
     ├── metricas.py             # RMSE, MAE, MAPE, R2
     ├── modelos_transversal.py  # regresión, random forest, boosting
-    └── modelos_temporal.py     # ARIMA, LSTM, CNN-LSTM, híbrido ARIMA+RF
+    └── modelos_temporal.py     # ARIMA, LSTM, híbrido ARIMA+RF
 ```
 
 ## Datos
@@ -38,7 +38,7 @@ python -m src.preparacion_datos
 # 2. Formulación transversal
 python -m src.modelos_transversal
 
-# 3. Formulación temporal (horizontes 1, 3, 6, 12 y 24 meses)
+# 3. Formulación temporal (horizontes 1, 3, 6 y 12 meses)
 python -m src.modelos_temporal
 ```
 
@@ -46,6 +46,4 @@ Añadir `--rapido` a los módulos de modelos para una comprobación sobre
 una submuestra. Las tablas de métricas quedan en `results/`. Las semillas
 aleatorias están fijadas (`SEED = 2025`) para reproducibilidad.
 
-Los modelos temporales se evalúan en cinco horizontes (1, 3, 6, 12 y
-24 meses) con partición cronológica 60/20/20, de modo que el tramo de
-prueba sea suficiente para evaluar el horizonte de 24 meses.
+Los modelos temporales se evalúan en cuatro horizontes (1, 3, 6 y 12 meses) con partición cronológica 70/20/10.

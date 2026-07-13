@@ -1,15 +1,14 @@
 """
 Formulación temporal: predicción del precio medio (eur/m2) por distrito.
 
-Compara cuatro enfoques sobre el panel mensual de distritos, en varios
-horizontes de predicción:
+Compara tres enfoques sobre el panel mensual de distritos, en varios
+horizontes de predicción (1, 3, 6 y 12 meses):
 
 1. ARIMA por serie (línea base), ajustado sobre log-retornos.
 2. LSTM entrenada de forma conjunta sobre las ventanas de las series.
-3. CNN-LSTM: capas convolucionales 1D antes de las recurrentes.
-4. Híbrido ARIMA + random forest sobre los residuos del ARIMA.
+3. Híbrido ARIMA + random forest sobre los residuos del ARIMA.
 
-Particiones cronológicas 60/20/20 por serie. La normalización
+Particiones cronológicas 70/20/10 por serie. La normalización
 mínimo-máximo de cada serie se ajusta solo con el tramo de
 entrenamiento. Las métricas se calculan en la escala original y se
 reportan tanto en promedio como por serie.
@@ -36,8 +35,8 @@ from .preparacion_datos import PROCESSED
 SEED = 2025
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 VENTANA = 12
-HORIZONTES = (1, 3, 6, 12, 24)
-FR_TRAIN, FR_VAL = 0.60, 0.20  # test = 20%
+HORIZONTES = (1, 3, 6, 12)
+FR_TRAIN, FR_VAL = 0.70, 0.20  # test = 10%
 EPS = 1e-9
 
 
@@ -362,15 +361,12 @@ def main(rapido=False, k=VENTANA):
     res_arima, residuos = arima_por_distrito(panel)
     print("LSTM sobre el panel...")
     res_lstm = red_sobre_panel(panel, "lstm", k, epocas=epocas)
-    print("CNN-LSTM sobre el panel...")
-    res_cnn = red_sobre_panel(panel, "cnn-lstm", k, epocas=epocas)
     print("Híbrido ARIMA + RF...")
     res_hib = hibrido_arima_rf(res_arima, residuos)
 
     modelos = {
         "ARIMA": res_arima,
         "LSTM": res_lstm,
-        "CNN-LSTM": res_cnn,
         "ARIMA + RF": res_hib,
     }
 

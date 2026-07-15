@@ -4,7 +4,9 @@ Formulación temporal: predicción del precio medio (eur/m2) por distrito.
 Compara tres enfoques sobre el panel mensual de distritos, en varios
 horizontes de predicción (1, 3, 6 y 12 meses):
 
-1. ARIMA por serie (línea base), ajustado sobre log-retornos.
+1. ARIMA(1,0,4) por serie (línea base), ajustado sobre log-retornos.
+   El orden se selecciona por AIC/BIC en rejilla (ver
+   comparar_ordenes_arima.py y el capítulo de desarrollo de la memoria).
 2. LSTM entrenada de forma conjunta sobre las ventanas de las series.
 3. Híbrido ARIMA + random forest sobre los residuos del ARIMA.
 
@@ -45,7 +47,7 @@ EPS = 1e-9
 # ---------------------------------------------------------------------------
 
 def particion_cronologica(serie):
-    """Índices de corte train/val/test (60/20/20) de una serie."""
+    """Índices de corte train/val/test (70/20/10) de una serie."""
     n = len(serie)
     i_tr = int(n * FR_TRAIN)
     i_va = int(n * (FR_TRAIN + FR_VAL))
@@ -92,7 +94,7 @@ def _log_retornos(serie):
     return np.diff(np.log(serie))
 
 
-def arima_por_distrito(panel, horizontes=HORIZONTES, orden=(4, 0, 4)):
+def arima_por_distrito(panel, horizontes=HORIZONTES, orden=(1, 0, 4)):
     """ARIMA sobre log-retornos, con predicción rodante a varios horizontes."""
     from statsmodels.tsa.arima.model import ARIMA
 

@@ -10,6 +10,7 @@ Genera las seis figuras de la sección en formato PDF vectorial:
     fig_eda_dispersion.pdf   log(precio) frente a cuatro predictores
     fig_eda_mapa.pdf         mapa de anuncios por precio unitario
     fig_eda_panel.pdf        series de distritos y variación intermensual
+    fig_mape_horizonte.pdf   MAPE medio por modelo y horizonte (cap. 5)
 
 Las cinco figuras transversales se calculan sobre el conjunto de 74.332
 anuncios resultante del colapso por media de duplicados, el descarte
@@ -43,6 +44,9 @@ from .preparacion_datos import (BINARIAS, P_INF, P_SUP, PROCESSED,
 
 # Carpeta de salida: apuntar a la carpeta Images del proyecto LaTeX.
 FIGURAS = Path(__file__).resolve().parents[1] / "memoria" / "Images"
+
+# Carpeta de resultados generada por modelos_temporal.py.
+RESULTS = Path(__file__).resolve().parents[1] / "results"
 
 # ---------------------------------------------------------------------
 # Estilo común: sobrio, tipografía con serifa (coherente con la memoria)
@@ -315,6 +319,56 @@ def fig_panel() -> None:
     plt.close()
 
 
+# Valores de la tabla de resultados de la memoria (tab:res-temporal),
+# empleados como respaldo si aún no existe results/temporal_metricas.csv.
+MAPE_HORIZONTE = {
+    "ARIMA":      [1.16, 2.58, 4.76, 10.17],
+    "ARIMA + RF": [1.19, 2.56, 4.71, 10.09],
+    "LSTM":       [3.04, 3.85, 5.44, 9.15],
+}
+HORIZONTES = [1, 3, 6, 12]
+
+
+def fig_mape_horizonte() -> None:
+    """Evolución del MAPE medio con el horizonte de predicción (fig. 5.2).
+
+    Lee las métricas de results/temporal_metricas.csv (generado por
+    ``modelos_temporal.py``); si el fichero no existe, emplea los valores
+    de la tabla de resultados de la memoria.
+    """
+    csv = RESULTS / "temporal_metricas.csv"
+    if csv.exists():
+        tabla = pd.read_csv(csv)
+        mape = {m: g.sort_values("Horizonte")["MAPE"].tolist()
+                for m, g in tabla.groupby("Modelo")}
+    else:
+        mape = MAPE_HORIZONTE
+
+    estilo = {
+        "ARIMA":      dict(color=AZUL, marker="o", ls="-", zorder=3),
+        "ARIMA + RF": dict(color="#8fb8d9", marker="s", ls="--", zorder=4),
+        "LSTM":       dict(color=NARANJA, marker="^", ls="-", zorder=3),
+    }
+
+    fig, ax = plt.subplots(figsize=(8.2, 4.3))
+    for nombre in ("ARIMA", "ARIMA + RF", "LSTM"):
+        ax.plot(HORIZONTES, mape[nombre], lw=1.8, ms=7, label=nombre,
+                **estilo[nombre])
+
+    ax.set_xticks(HORIZONTES)
+    ax.set_xlabel("Horizonte de predicción (meses)")
+    ax.set_ylabel("MAPE (%)")
+    ax.set_ylim(0, 11)
+    # Coma decimal en el eje de ordenadas, coherente con la memoria.
+    ax.yaxis.set_major_formatter(
+        FuncFormatter(lambda v, _: f"{v:g}".replace(".", ",")))
+    ax.legend(frameon=False, loc="upper left")
+
+    plt.tight_layout()
+    plt.savefig(FIGURAS / "fig_mape_horizonte.pdf", bbox_inches="tight")
+    plt.close()
+
+
 def main() -> None:
     FIGURAS.mkdir(parents=True, exist_ok=True)
 
@@ -327,6 +381,7 @@ def main() -> None:
     fig_dispersion(bas)
     fig_mapa(bas)
     fig_panel()
+    fig_mape_horizonte()
 
     print(f"Figuras generadas en {FIGURAS}")
 

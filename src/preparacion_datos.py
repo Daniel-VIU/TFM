@@ -7,8 +7,9 @@ Implementa la sección "Preparación de los datos" de la memoria:
    - Lectura del CSV corrigiendo sus dos defectos de formato:
      a) columna índice inicial sin nombre en la cabecera,
      b) columna final `geometry` con una coma interior sin entrecomillar.
-   - Depuración: duplicados, tipos, año de construcción ausente
-     (sustituido por el año catastral), filtrado de atípicos extremos.
+   - Depuración: colapso de duplicados por media, descarte del año de
+     construcción declarado (se conserva el catastral, completo y
+     redundante con él), filtrado de atípicos extremos.
 
 2. Panel temporal (informes de precios de idealista por distrito):
    - Lectura del libro de cálculo (una hoja por distrito).
@@ -47,7 +48,7 @@ BINARIAS = [
 
 # Predictores continuos / discretos.
 CONTINUAS = [
-    "CONSTRUCTEDAREA", "ROOMNUMBER", "BATHNUMBER", "CONSTRUCTIONYEAR",
+    "CONSTRUCTEDAREA", "ROOMNUMBER", "BATHNUMBER",
     "FLOORCLEAN", "CADCONSTRUCTIONYEAR", "CADMAXBUILDINGFLOOR",
     "CADDWELLINGCOUNT", "CADASTRALQUALITYID",
     "DISTANCE_TO_CITY_CENTER", "DISTANCE_TO_METRO", "DISTANCE_TO_CASTELLANA",
@@ -91,23 +92,40 @@ def depurar_transversal(df: pd.DataFrame) -> pd.DataFrame:
     n0 = len(df)
 
     # El mismo anuncio puede aparecer varias veces dentro de un trimestre
-    # con precios distintos (revisiones de precio del vendedor). Se
-    # conserva la última observación de cada par (anuncio, periodo), que
-    # corresponde al precio de oferta final del trimestre.
-    df = df.drop_duplicates(subset=["ASSETID", "PERIOD"], keep="last")
-
-    # Año de construcción: si falta el declarado se usa el catastral.
-    df["CONSTRUCTIONYEAR"] = df["CONSTRUCTIONYEAR"].fillna(
-        df["CADCONSTRUCTIONYEAR"]
-    )
-    # Años declarados imposibles (errores de carga del anuncio) se
-    # sustituyen también por el catastral.
-    fuera_rango = (df["CONSTRUCTIONYEAR"] < 1800) | (
-        df["CONSTRUCTIONYEAR"] > 2018
-    )
-    df.loc[fuera_rango, "CONSTRUCTIONYEAR"] = df.loc[
-        fuera_rango, "CADCONSTRUCTIONYEAR"
+    # con precios distintos (revisiones de precio del vendedor). El
+    # fichero no incluye marca temporal intra-trimestral, por lo que la
+    # antigüedad relativa de las apariciones no es observable con
+    # garantías. Se colapsa cada par (anuncio, periodo) en un único
+    # registro tomando la MEDIA de sus apariciones, un criterio
+    # independiente del orden del fichero que utiliza toda la
+    # información de las revisiones (véase la sección "Registros
+    # duplicados" del análisis exploratorio de la memoria). Tras la
+    # media, las variables discretas se redondean al entero más próximo
+    # y las binarias se resuelven por mayoría (media >= 0,5 -> 1); el
+    # precio unitario se recalcula para mantener la coherencia interna.
+    DISCRETAS = [
+        "ROOMNUMBER", "BATHNUMBER", "FLOORCLEAN",
+        "CADCONSTRUCTIONYEAR", "CADMAXBUILDINGFLOOR", "CADDWELLINGCOUNT",
+        "CADASTRALQUALITYID", "FLATLOCATIONID", "AMENITYID",
+        "ISPARKINGSPACEINCLUDEDINPRICE", "BUILTTYPEID_1", "BUILTTYPEID_2",
+        "BUILTTYPEID_3",
     ]
+    df = df.groupby(["ASSETID", "PERIOD"], as_index=False).mean()
+    for col in DISCRETAS:
+        df[col] = np.floor(df[col] + 0.5)          # redondeo al entero
+    for col in BINARIAS:
+        df[col] = (df[col] >= 0.5).astype(float)    # voto por mayoría
+    df["UNITPRICE"] = df["PRICE"] / df["CONSTRUCTEDAREA"]
+
+    # Año de construcción: el análisis exploratorio muestra que la
+    # variable declarada en el anuncio tiene un 59,8 % de ausencias tras
+    # el colapso y errores manifiestos entre los valores presentes (años
+    # del 1 al 2291), mientras que el registro catastral está completo,
+    # no contiene valores imposibles (rango 1623-2018) y coincide con el
+    # declarado en el 98,8 % de los registros en que ambos existen. Se
+    # descarta por tanto la variable declarada y se conserva la catastral
+    # (CADCONSTRUCTIONYEAR) como único año de construcción.
+    df = df.drop(columns=["CONSTRUCTIONYEAR"])
 
     # Cribado de colas extremas en precio y superficie.
     for col in [RESPUESTA, "CONSTRUCTEDAREA"]:
@@ -117,6 +135,40 @@ def depurar_transversal(df: pd.DataFrame) -> pd.DataFrame:
     # Binarias a entero 0/1.
     for col in BINARIAS:
         df[col] = df[col].fillna(0).astype(int)
+
+    # ------------------------------------------------------------------
+    # Filtros adicionales motivados por el análisis exploratorio
+    # (sección "Análisis exploratorio de los datos" de la memoria).
+    # ------------------------------------------------------------------
+
+    # a) Errores de geolocalización: anuncios situados fuera del término
+    #    municipal de Madrid (el EDA detectó un anuncio geocodificado en
+    #    la provincia de Almería, a 416 km del centro, que distorsionaba
+    #    las tres variables de distancia).
+    dentro = df["LATITUDE"].between(40.30, 40.66) & df["LONGITUDE"].between(
+        -3.90, -3.50
+    )
+    df = df[dentro]
+
+    # b) Incoherencias físicas: viviendas sin cuarto de baño (no
+    #    habitables según el art. 7.3.4 del PGOUM), número de
+    #    habitaciones imposible (>15, p. ej. 93 habitaciones en 119 m2)
+    #    o menos de 8 m2 construidos por habitación.
+    incoherente = (
+        (df["BATHNUMBER"] == 0)
+        | (df["ROOMNUMBER"] > 15)
+        | (
+            (df["ROOMNUMBER"] > 0)
+            & (df["CONSTRUCTEDAREA"] / df["ROOMNUMBER"] < 8)
+        )
+    )
+    df = df[~incoherente]
+
+    # c) Nulos residuales en dos predictores (planta y calidad
+    #    catastral): eliminación por lista. Este paso se realizaba antes
+    #    de forma implícita en la fase de modelización; se traslada aquí
+    #    para que el conjunto depurado sea directamente el de trabajo.
+    df = df.dropna(subset=["FLOORCLEAN", "CADASTRALQUALITYID"])
 
     df = df.reset_index(drop=True)
     print(f"Transversal: {n0} -> {len(df)} registros tras depuración")

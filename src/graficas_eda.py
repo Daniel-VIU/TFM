@@ -10,6 +10,7 @@ Genera las seis figuras de la sección en formato PDF vectorial:
     fig_eda_dispersion.pdf   log(precio) frente a cuatro predictores
     fig_eda_mapa.pdf         mapa de anuncios por precio unitario
     fig_eda_panel.pdf        series de distritos y variación intermensual
+    fig_importancia_rf.pdf   importancia de variables del RF final (cap. 5)
     fig_mape_horizonte.pdf   MAPE medio por modelo y horizonte (cap. 5)
 
 Las cinco figuras transversales se calculan sobre el conjunto de 74.332
@@ -319,6 +320,84 @@ def fig_panel() -> None:
     plt.close()
 
 
+# Nombres en castellano de las binarias de equipamiento (complementan a
+# NOMBRES, que cubre las variables continuas o discretas).
+NOMBRES_BINARIAS = {
+    "HASTERRACE": "Terraza", "HASLIFT": "Ascensor",
+    "HASAIRCONDITIONING": "Aire acondicionado",
+    "HASPARKINGSPACE": "Plaza de garaje",
+    "HASNORTHORIENTATION": "Orientación norte",
+    "HASSOUTHORIENTATION": "Orientación sur",
+    "HASEASTORIENTATION": "Orientación este",
+    "HASWESTORIENTATION": "Orientación oeste",
+    "HASBOXROOM": "Trastero", "HASWARDROBE": "Armarios empotrados",
+    "HASSWIMMINGPOOL": "Piscina", "HASDOORMAN": "Portero",
+    "HASGARDEN": "Jardín", "ISDUPLEX": "Dúplex",
+    "ISSTUDIO": "Estudio", "ISINTOPFLOOR": "Última planta",
+}
+
+# Configuración ganadora de la validación cruzada del random forest
+# (véase modelos_transversal.py): 500 árboles y un tercio de los
+# predictores como candidatos en cada división.
+RF_FINAL = dict(n_estimators=500, max_features=1.0 / 3.0)
+
+
+def fig_importancia_rf(n_top: int = 12) -> None:
+    """Importancia de variables del random forest final (fig. 5.1).
+
+    Lee las importancias de results/transversal_importancias.csv si el
+    fichero existe; en caso contrario reentrena el random forest final
+    con el mismo protocolo que ``modelos_transversal`` (objetivo en log
+    del precio, partición 80/20 con semilla fija y la configuración
+    ganadora de la validación cruzada) y persiste el CSV para no repetir
+    el entrenamiento en ejecuciones posteriores. Representa las
+    ``n_top`` variables con mayor reducción media de impureza.
+    """
+    csv = RESULTS / "transversal_importancias.csv"
+    if csv.exists():
+        imp = pd.read_csv(csv)
+    else:
+        from sklearn.ensemble import RandomForestRegressor
+        from sklearn.model_selection import train_test_split
+
+        from .modelos_transversal import PREDICTORES, SEED, cargar
+
+        X, y = cargar()
+        X_tr, _, y_tr, _ = train_test_split(
+            X, np.log(y), test_size=0.2, random_state=SEED
+        )
+        rf = RandomForestRegressor(random_state=SEED, n_jobs=-1, **RF_FINAL)
+        rf.fit(X_tr, y_tr)
+        imp = (
+            pd.DataFrame({"Variable": PREDICTORES,
+                          "Importancia": rf.feature_importances_})
+            .sort_values("Importancia", ascending=False)
+            .reset_index(drop=True)
+        )
+        RESULTS.mkdir(exist_ok=True)
+        imp.to_csv(csv, index=False)
+
+    nombres = {**NOMBRES, **NOMBRES_BINARIAS}
+    top = imp.nlargest(n_top, "Importancia").iloc[::-1]   # barh: mayor arriba
+    etiquetas = [nombres.get(v, v) for v in top["Variable"]]
+    valores = top["Importancia"].to_numpy() * 100
+
+    fig, ax = plt.subplots(figsize=(8.2, 4.6))
+    ax.barh(etiquetas, valores, color=AZUL, edgecolor="white",
+            lw=0.4, height=0.72)
+    for i, v in enumerate(valores):
+        ax.text(v + 0.4, i, f"{v:.1f}".replace(".", ",") + " %",
+                va="center", fontsize=8.5)
+    ax.set_xlabel("Reducción media de impureza (% del total)")
+    ax.set_xlim(0, valores.max() * 1.13)
+    ax.yaxis.grid(False)
+    ax.xaxis.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(FIGURAS / "fig_importancia_rf.pdf", bbox_inches="tight")
+    plt.close()
+
+
 # Valores de la tabla de resultados de la memoria (tab:res-temporal),
 # empleados como respaldo si aún no existe results/temporal_metricas.csv.
 MAPE_HORIZONTE = {
@@ -381,6 +460,7 @@ def main() -> None:
     fig_dispersion(bas)
     fig_mapa(bas)
     fig_panel()
+    fig_importancia_rf()
     fig_mape_horizonte()
 
     print(f"Figuras generadas en {FIGURAS}")

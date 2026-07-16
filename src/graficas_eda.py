@@ -12,6 +12,7 @@ Genera las seis figuras de la sección en formato PDF vectorial:
     fig_eda_panel.pdf        series de distritos y variación intermensual
     fig_importancia_rf.pdf   importancia de variables del RF final (cap. 5)
     fig_mape_horizonte.pdf   MAPE medio por modelo y horizonte (cap. 5)
+    fig_mape_distritos.pdf   MAPE a un mes por distrito y modelo (cap. 5)
 
 Las cinco figuras transversales se calculan sobre el conjunto de 74.332
 anuncios resultante del colapso por media de duplicados, el descarte
@@ -448,6 +449,93 @@ def fig_mape_horizonte() -> None:
     plt.close()
 
 
+# MAPE (%) por distrito en el horizonte de un mes (tabla por distrito de
+# la memoria), empleado como respaldo si aún no existe
+# results/temporal_por_distrito.csv.
+MAPE_DISTRITO = [
+    # (distrito, ARIMA, LSTM, ARIMA + RF)
+    ("Tetuán", 0.757, 2.326, 0.840),
+    ("Chamartín", 0.812, 4.452, 0.865),
+    ("Fuencarral", 0.854, 2.256, 1.004),
+    ("Chamberí", 0.881, 4.376, 0.925),
+    ("Arganzuela", 0.903, 1.896, 0.982),
+    ("Usera", 0.905, 1.900, 0.801),
+    ("Centro", 0.948, 1.167, 1.025),
+    ("Carabanchel", 0.949, 2.076, 0.964),
+    ("Moncloa", 0.962, 5.339, 0.941),
+    ("Salamanca", 1.001, 8.337, 1.067),
+    ("Ciudad Lineal", 1.027, 1.762, 0.985),
+    ("Latina", 1.092, 3.096, 1.117),
+    ("Retiro", 1.135, 5.712, 1.150),
+    ("Hortaleza", 1.145, 1.561, 1.100),
+    ("Puente de Vallecas", 1.206, 2.568, 1.130),
+    ("San Blas", 1.282, 2.207, 1.267),
+    ("Moratalaz", 1.322, 3.539, 1.373),
+    ("Villa de Vallecas", 1.660, 1.483, 1.715),
+    ("Villaverde", 1.665, 2.906, 1.684),
+    ("Vicálvaro", 1.750, 2.679, 1.698),
+    ("Barajas", 2.175, 2.086, 2.262),
+]
+
+
+def fig_mape_distritos() -> None:
+    """MAPE a un mes por distrito y modelo (sección de heterogeneidad).
+
+    Lee las métricas de results/temporal_por_distrito.csv (generado por
+    ``modelos_temporal.py``); si el fichero no existe, emplea los valores
+    de la tabla por distrito de la memoria. Los distritos se ordenan por
+    el error del ARIMA y se destacan en negrita aquellos en los que la
+    LSTM supera al ARIMA ya en el horizonte de un mes.
+    """
+    csv = RESULTS / "temporal_por_distrito.csv"
+    if csv.exists():
+        df = pd.read_csv(csv)
+    else:
+        df = pd.DataFrame(MAPE_DISTRITO,
+                          columns=["Distrito", "ARIMA", "LSTM", "ARIMA + RF"])
+    df = df.sort_values("ARIMA").reset_index(drop=True)
+    y = range(len(df))
+
+    fig, ax = plt.subplots(figsize=(8.5, 6.2))
+
+    # Segmento gris que une el error del ARIMA y el de la LSTM.
+    for i, fila in df.iterrows():
+        ax.plot([fila["ARIMA"], fila["LSTM"]], [i, i],
+                color=GRIS, lw=1.0, alpha=0.6, zorder=1)
+
+    ax.scatter(df["ARIMA"], y, color=AZUL, s=34, zorder=3, label="ARIMA")
+    ax.scatter(df["ARIMA + RF"], y, color="#8fb8d9", s=26, marker="s",
+               zorder=2, label="ARIMA + RF")
+    ax.scatter(df["LSTM"], y, color=NARANJA, s=34, zorder=3, label="LSTM")
+
+    # Media del ARIMA sobre los 21 distritos, como referencia.
+    media = df["ARIMA"].mean()
+    ax.axvline(media, color=AZUL, lw=1.0, ls=":", alpha=0.8, zorder=1)
+    ax.text(media + 0.06, len(df) - 0.4,
+            f"media ARIMA: {media:.2f}\u2009%".replace(".", ","),
+            color=AZUL, fontsize=8.5, va="top")
+
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(df["Distrito"])
+    # En negrita, los distritos en los que la LSTM supera al ARIMA.
+    for tick, (_, fila) in zip(ax.get_yticklabels(), df.iterrows()):
+        if fila["LSTM"] < fila["ARIMA"]:
+            tick.set_fontweight("bold")
+
+    ax.set_xlabel("MAPE (%) en el horizonte de un mes")
+    ax.set_xlim(0, df["LSTM"].max() * 1.06)
+    ax.invert_yaxis()  # menor error del ARIMA arriba
+    ax.grid(axis="y", alpha=0.15)
+    # Coma decimal en el eje de abscisas, coherente con la memoria.
+    ax.xaxis.set_major_formatter(
+        FuncFormatter(lambda v, _: f"{v:g}".replace(".", ",")))
+    ax.legend(frameon=False, loc="lower right")
+
+    plt.tight_layout()
+    plt.savefig(FIGURAS / "fig_mape_distritos.pdf", bbox_inches="tight")
+    plt.close()
+
+
 def main() -> None:
     FIGURAS.mkdir(parents=True, exist_ok=True)
 
@@ -462,6 +550,7 @@ def main() -> None:
     fig_panel()
     fig_importancia_rf()
     fig_mape_horizonte()
+    fig_mape_distritos()
 
     print(f"Figuras generadas en {FIGURAS}")
 

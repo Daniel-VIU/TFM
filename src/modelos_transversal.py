@@ -11,7 +11,8 @@ gradient boosting sobre el conjunto idealista18 depurado, con:
   dentro del tramo de entrenamiento;
 - evaluación final única sobre el tramo de prueba, con métricas dadas
   tanto en escala logarítmica como en euros (revertidas con exp);
-- test de robustez del mejor modelo sobre varias semillas de partición.
+- test de robustez de los dos métodos de ensamblado sobre varias
+  semillas de partición.
 
 Uso:
     python -m src.modelos_transversal [--rapido]
@@ -34,6 +35,8 @@ from .preparacion_datos import BINARIAS, CONTINUAS, PROCESSED, RESPUESTA
 
 SEED = 2025
 SEMILLAS_ROBUSTEZ = [2025, 7, 123, 2024, 99]
+# Modelos sometidos al test de robustez frente a la partición.
+MODELOS_ROBUSTEZ = ["Random forest", "Gradient boosting"]
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 
 PREDICTORES = CONTINUAS + BINARIAS
@@ -109,6 +112,32 @@ def ajustar(nombre, modelo, malla, X_tr, y_tr):
     return modelo.fit(X_tr, y_tr), {}
 
 
+def test_robustez(nombre, modelo_base, X, y_log):
+    """Reentrena y evalúa un modelo sobre las semillas de robustez.
+
+    El modelo conserva los hiperparámetros seleccionados en la partición
+    principal; solo cambia la semilla del reparto entrenamiento/prueba.
+    Devuelve la tabla de métricas por semilla.
+    """
+    filas = []
+    for s in SEMILLAS_ROBUSTEZ:
+        Xtr, Xte, ytr, yte = train_test_split(
+            X, y_log, test_size=0.2, random_state=s)
+        m = modelo_base.__class__(**{**modelo_base.get_params()})
+        m.fit(Xtr, ytr)
+        d = metricas_dobles(yte, m.predict(Xte))
+        filas.append({"Semilla": s, "R2_log": round(d["R2_log"], 4),
+                      "MAE_eur": round(d["MAE_eur"], 1),
+                      "RMSE_eur": round(d["RMSE_eur"], 1)})
+    rob = pd.DataFrame(filas).set_index("Semilla")
+    print(f"\nTest de robustez de '{nombre}' sobre "
+          f"{len(SEMILLAS_ROBUSTEZ)} semillas de partición:")
+    print(rob)
+    print(f"R2_log medio: {rob['R2_log'].mean():.4f} "
+          f"± {rob['R2_log'].std():.4f}")
+    return rob
+
+
 def main(rapido=False):
     X, y = cargar()
     if rapido:
@@ -136,27 +165,15 @@ def main(rapido=False):
     RESULTS.mkdir(exist_ok=True)
     tabla.to_csv(RESULTS / "transversal_metricas.csv")
 
-    # Test de robustez del mejor modelo (menor RMSE en euros).
-    mejor_nombre = tabla["RMSE_eur"].idxmin()
-    print(f"\nTest de robustez de '{mejor_nombre}' sobre "
-          f"{len(SEMILLAS_ROBUSTEZ)} semillas de partición:")
-    modelo_base, params = mejores[mejor_nombre]
-    filas_rob = []
-    for s in SEMILLAS_ROBUSTEZ:
-        Xtr, Xte, ytr, yte = train_test_split(
-            X, y_log, test_size=0.2, random_state=s)
-        m = modelo_base.__class__(**{**modelo_base.get_params()})
-        m.fit(Xtr, ytr)
-        d = metricas_dobles(yte, m.predict(Xte))
-        filas_rob.append({"Semilla": s, "R2_log": round(d["R2_log"], 4),
-                          "MAE_eur": round(d["MAE_eur"], 1),
-                          "RMSE_eur": round(d["RMSE_eur"], 1)})
-    rob = pd.DataFrame(filas_rob).set_index("Semilla")
-    media = rob["R2_log"].mean()
-    desv = rob["R2_log"].std()
-    print(rob)
-    print(f"R2_log medio: {media:.4f} ± {desv:.4f}")
-    rob.to_csv(RESULTS / "transversal_robustez.csv")
+    # Test de robustez de los dos métodos de ensamblado: se reentrenan
+    # con sus hiperparámetros ya seleccionados sobre las mismas cinco
+    # particiones aleatorias, lo que permite comparar su estabilidad y
+    # comprobar que el orden de la comparativa se mantiene en todas.
+    sufijos = {"Random forest": "rf", "Gradient boosting": "gb"}
+    for nombre in MODELOS_ROBUSTEZ:
+        modelo_base, _ = mejores[nombre]
+        rob = test_robustez(nombre, modelo_base, X, y_log)
+        rob.to_csv(RESULTS / f"transversal_robustez_{sufijos[nombre]}.csv")
     return tabla
 
 

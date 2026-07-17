@@ -7,7 +7,7 @@ Genera las seis figuras de la sección en formato PDF vectorial:
     fig_eda_precio.pdf       distribución del precio y de su logaritmo
     fig_eda_boxplots.pdf     precio por nº de habitaciones y superficie
     fig_eda_correlacion.pdf  matriz de correlaciones de Pearson
-    fig_eda_dispersion.pdf   log(precio) frente a cuatro predictores
+    fig_eda_dispersion.pdf   log(precio) frente a dos predictores
     fig_eda_mapa.pdf         mapa de anuncios por precio unitario
     fig_eda_panel.pdf        series de distritos y variación intermensual
     fig_importancia_rf.pdf   importancia de variables del RF final (cap. 5)
@@ -216,13 +216,13 @@ def fig_correlacion(bas: pd.DataFrame) -> None:
 
 def fig_dispersion(bas: pd.DataFrame, n: int = 15_000, semilla: int = 1
                    ) -> None:
-    """log(precio) frente a cuatro predictores (muestra aleatoria).
+    """log(precio) frente a dos predictores (muestra aleatoria).
 
     Los puntos se rasterizan dentro del PDF para que el fichero no pese
     decenas de megabytes; ejes y texto siguen siendo vectoriales.
     """
     m = bas.sample(n, random_state=semilla)
-    fig, axes = plt.subplots(2, 2, figsize=(9.5, 6.6))
+    fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.4))
 
     def scat(ax, x, xlab):
         ax.scatter(x, np.log(m["PRICE"]), s=2, alpha=0.15, color=AZUL,
@@ -230,17 +230,11 @@ def fig_dispersion(bas: pd.DataFrame, n: int = 15_000, semilla: int = 1
         ax.set_xlabel(xlab)
         ax.set_ylabel("log(precio)")
 
-    scat(axes[0, 0], m["CONSTRUCTEDAREA"], "Superficie construida (m$^2$)")
-    axes[0, 0].set_title("(a) Superficie")
-    scat(axes[0, 1], m["DISTANCE_TO_CASTELLANA"],
+    scat(axes[0], m["CONSTRUCTEDAREA"], "Superficie construida (m$^2$)")
+    axes[0].set_title("(a) Superficie")
+    scat(axes[1], m["DISTANCE_TO_CASTELLANA"],
          "Distancia a la Castellana (km)")
-    axes[0, 1].set_title("(b) Distancia a la Castellana")
-    scat(axes[1, 0], m["CADCONSTRUCTIONYEAR"], "Año de construcción")
-    axes[1, 0].set_title("(c) Año de construcción")
-    axes[1, 0].set_xlim(1850, 2020)
-    scat(axes[1, 1], m["CADASTRALQUALITYID"],
-         "Calidad catastral (1 = máxima, 9 = mínima)")
-    axes[1, 1].set_title("(d) Calidad catastral")
+    axes[1].set_title("(b) Distancia a la Castellana")
 
     plt.tight_layout()
     plt.savefig(FIGURAS / "fig_eda_dispersion.pdf", bbox_inches="tight")

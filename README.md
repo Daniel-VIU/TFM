@@ -13,6 +13,7 @@ Series Temporales"*.
 ├── results/          # tablas de métricas generadas
 └── src/
     ├── preparacion_datos.py    # limpieza idealista18 y panel de distritos
+    ├── graficas_eda.py         # figuras del análisis exploratorio
     ├── metricas.py             # RMSE, MAE, MAPE, R2
     ├── modelos_transversal.py  # regresión, random forest, boosting
     └── modelos_temporal.py     # ARIMA, LSTM, híbrido ARIMA+RF
@@ -46,4 +47,33 @@ Añadir `--rapido` a los módulos de modelos para una comprobación sobre
 una submuestra. Las tablas de métricas quedan en `results/`. Las semillas
 aleatorias están fijadas (`SEED = 2025`) para reproducibilidad.
 
-Los modelos temporales se evalúan en cuatro horizontes (1, 3, 6 y 12 meses) con partición cronológica 70/20/10.
+Los modelos temporales se evalúan en cuatro horizontes (1, 3, 6 y 12
+meses) con partición cronológica 70/20/10.
+
+## Notas sobre la formulación temporal
+
+- **Híbrido ARIMA + random forest.** El corrector de residuos se
+  construye estrictamente con la información disponible en el origen de
+  cada predicción: la cola de residuos contiene solo los realizados
+  hasta ese origen y, para el objetivo situado `h` meses por delante, el
+  bosque predice recursivamente los `h` residuos siguientes
+  realimentando sus propias estimaciones. La corrección aplicada al
+  nivel del ARIMA es la exponencial de su suma, coherente con el
+  encadenamiento de log-retornos.
+
+- **Asimetría de información ARIMA / LSTM.** El ARIMA se reajusta de
+  forma rodante con toda la historia disponible en cada origen de
+  prueba, mientras que la LSTM se entrena solo con el 70 % inicial de
+  cada serie (la validación interviene únicamente en la parada
+  temprana). Es una decisión de diseño deliberada, documentada en la
+  memoria, que sitúa al modelo clásico como línea base exigente. La
+  opción
+
+  ```bash
+  python -m src.modelos_temporal --incluir-validacion
+  ```
+
+  reentrena la LSTM con el tramo de validación incluido (durante el
+  número de épocas fijado por la parada temprana) y permite cuantificar
+  el efecto de esa asimetría como experimento de sensibilidad; la
+  configuración por defecto es la reportada en la memoria.

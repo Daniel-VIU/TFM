@@ -10,6 +10,7 @@ Genera las seis figuras de la sección en formato PDF vectorial:
     fig_eda_dispersion.pdf   log(precio) frente a dos predictores
     fig_eda_mapa.pdf         mapa de anuncios por precio unitario
     fig_eda_panel.pdf        series de distritos y variación intermensual
+    fig_nivel_logret.pdf     nivel frente a log-retorno de las series (cap. 4)
     fig_importancia_rf.pdf   importancia de variables del RF final (cap. 5)
     fig_mape_horizonte.pdf   MAPE medio por modelo y horizonte (cap. 5)
     fig_mape_distritos.pdf   MAPE a un mes por distrito y modelo (cap. 5)
@@ -315,6 +316,64 @@ def fig_panel() -> None:
     plt.close()
 
 
+def fig_nivel_logret() -> None:
+    """Nivel frente a log-retorno de las 21 series de distrito (cap. 4).
+
+    Motiva la especificación del ARIMA sobre el log-retorno con d = 0:
+    el nivel del precio por m2 presenta una tendencia marcada (corrección
+    de 2008-2014 y aceleración posterior a 2022), mientras que el
+    log-retorno mensual elimina esa tendencia y oscila en una banda
+    estable en torno a cero. La media móvil de 12 meses de la mediana
+    hace visible que la media local del retorno varía lentamente con el
+    ciclo del mercado, matiz que la memoria recoge al discutir la
+    estacionariedad de la serie transformada.
+    """
+    panel = pd.read_csv(PROCESSED / "panel_distritos.csv",
+                        parse_dates=["fecha"])
+    panel = panel.sort_values(["distrito", "fecha"])
+    panel["logret"] = panel.groupby("distrito")["precio_m2"].transform(
+        lambda s: np.log(s).diff()) * 100
+
+    # Coma decimal en el eje del retorno, coherente con la memoria.
+    coma = FuncFormatter(lambda v, _: f"{v:g}".replace(".", ","))
+
+    fig, axes = plt.subplots(2, 1, figsize=(9.5, 5.6), sharex=True)
+
+    # (a) nivel: las 21 series en gris, mediana destacada.
+    ax = axes[0]
+    for _, g in panel.groupby("distrito"):
+        ax.plot(g["fecha"], g["precio_m2"], color=GRIS, lw=0.6, alpha=0.5)
+    mediana = panel.groupby("fecha")["precio_m2"].median()
+    ax.plot(mediana.index, mediana.values, color=AZUL, lw=1.7,
+            label="Mediana de distritos")
+    ax.set_ylabel("Precio medio (€/m$^2$)")
+    ax.set_title("(a) Nivel: precio medio por m$^2$")
+    ax.yaxis.set_major_formatter(MILES)
+    ax.legend(frameon=False, fontsize=8.5, loc="upper left")
+
+    # (b) log-retorno mensual: banda estable en torno a cero.
+    ax = axes[1]
+    for _, g in panel.groupby("distrito"):
+        ax.plot(g["fecha"], g["logret"], color=GRIS, lw=0.6, alpha=0.45)
+    med_ret = panel.groupby("fecha")["logret"].median()
+    ax.plot(med_ret.index, med_ret.values, color=AZUL, lw=1.5,
+            label="Mediana de distritos")
+    ax.axhline(0, color="black", lw=0.8)
+    # Media móvil centrada de 12 meses: deriva lenta de la media local.
+    movil = med_ret.rolling(12, center=True).mean()
+    ax.plot(movil.index, movil.values, color=NARANJA, lw=1.6, ls="--",
+            label="Media móvil de 12 meses")
+    ax.set_ylabel("Log-retorno mensual (%)")
+    ax.set_title("(b) Log-retorno mensual")
+    ax.set_ylim(-6, 6)
+    ax.yaxis.set_major_formatter(coma)
+    ax.legend(frameon=False, fontsize=8.5, loc="lower left", ncols=2)
+
+    plt.tight_layout()
+    plt.savefig(FIGURAS / "fig_nivel_logret.pdf", bbox_inches="tight")
+    plt.close()
+
+
 # Nombres en castellano de las binarias de equipamiento (complementan a
 # NOMBRES, que cubre las variables continuas o discretas).
 NOMBRES_BINARIAS = {
@@ -542,6 +601,7 @@ def main() -> None:
     fig_dispersion(bas)
     fig_mapa(bas)
     fig_panel()
+    fig_nivel_logret()
     fig_importancia_rf()
     fig_mape_horizonte()
     fig_mape_distritos()

@@ -165,6 +165,17 @@ def main(rapido=False):
     RESULTS.mkdir(exist_ok=True)
     tabla.to_csv(RESULTS / "transversal_metricas.csv")
 
+    # Persistir los hiperparámetros seleccionados por GridSearchCV, de
+    # modo que las combinaciones ganadoras reportadas en la memoria
+    # queden respaldadas por un fichero reproducible.
+    hiper = pd.DataFrame(
+        [{"Modelo": nombre, **params}
+         for nombre, (_, params) in mejores.items() if params]
+    ).set_index("Modelo")
+    hiper.to_csv(RESULTS / "transversal_hiperparametros.csv")
+    print("\nHiperparámetros seleccionados:")
+    print(hiper)
+
     # Test de robustez de los dos métodos de ensamblado: se reentrenan
     # con sus hiperparámetros ya seleccionados sobre las mismas cinco
     # particiones aleatorias, lo que permite comparar su estabilidad y

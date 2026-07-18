@@ -96,7 +96,18 @@ def _log_retornos(serie):
 
 
 def arima_por_distrito(panel, horizontes=HORIZONTES, orden=(1, 0, 4)):
-    """ARIMA sobre log-retornos, con predicción rodante a varios horizontes."""
+    """ARIMA sobre log-retornos, con predicción rodante a varios horizontes.
+
+    Nota sobre comparabilidad: el reajuste rodante incorpora en cada
+    origen de prueba toda la historia disponible (incluidos los tramos
+    de validación y de prueba ya observados), mientras que la LSTM se
+    entrena solo con el 70 % inicial de cada serie. Es una decisión de
+    diseño deliberada (línea base exigente) que favorece al ARIMA en la
+    información disponible; se documenta en la memoria y puede
+    cuantificarse con la opción --incluir-validacion de la LSTM, que
+    reduce parcialmente la asimetría reentrenando la red con el tramo de
+    validación incluido.
+    """
     from statsmodels.tsa.arima.model import ARIMA
 
     res = {h: {} for h in horizontes}
@@ -180,8 +191,20 @@ def _predecir_recursivo_lote(modelo, ventanas_ini, k, h):
     return v[:, -1]
 
 
-def red_sobre_panel(panel, tipo, k, horizontes=HORIZONTES, epocas=150):
-    """Entrena una red a un paso y evalúa a varios horizontes por recursión."""
+def red_sobre_panel(panel, tipo, k, horizontes=HORIZONTES, epocas=150,
+                    incluir_validacion=False):
+    """Entrena una red a un paso y evalúa a varios horizontes por recursión.
+
+    Con ``incluir_validacion=True`` se realiza un segundo entrenamiento:
+    tras determinar el número de épocas óptimo mediante parada temprana
+    sobre el tramo de validación, la red se reentrena desde cero sobre
+    la unión de entrenamiento y validación durante ese número de épocas.
+    Esta variante reduce la asimetría de información frente al ARIMA
+    rodante (que en cada origen de prueba dispone de toda la historia
+    previa) y sirve como experimento de sensibilidad; la configuración
+    por defecto (False) es la reportada en la comparativa principal de
+    la memoria.
+    """
     import tensorflow as tf
 
     Xtr, ytr, Xva, yva = [], [], [], []
@@ -224,7 +247,7 @@ def red_sobre_panel(panel, tipo, k, horizontes=HORIZONTES, epocas=150):
         ),
     ]
 
-    modelo.fit(
+    historia = modelo.fit(
         Xtr,
         ytr,
         validation_data=(Xva, yva),
@@ -234,6 +257,23 @@ def red_sobre_panel(panel, tipo, k, horizontes=HORIZONTES, epocas=150):
         shuffle=True,
         callbacks=callbacks,
     )
+
+    if incluir_validacion:
+        # Épocas óptimas según la pérdida de validación del primer
+        # entrenamiento; la red se reentrena desde cero con
+        # entrenamiento + validación durante ese número de épocas.
+        ep_opt = int(np.argmin(historia.history["val_loss"])) + 1
+        print(f"    reentrenamiento con validación incluida "
+              f"({ep_opt} épocas)")
+        modelo = construir_red(tipo, k)
+        modelo.fit(
+            np.concatenate([Xtr, Xva]),
+            np.concatenate([ytr, yva]),
+            epochs=ep_opt,
+            batch_size=128,
+            verbose=0,
+            shuffle=True,
+        )
 
     res = {h: {} for h in horizontes}
     for idx, (distrito, (s, i_va)) in enumerate(tramos.items(), 1):
@@ -269,7 +309,30 @@ def red_sobre_panel(panel, tipo, k, horizontes=HORIZONTES, epocas=150):
 # ---------------------------------------------------------------------------
 
 def hibrido_arima_rf(res_arima, residuos, horizontes=HORIZONTES, k=6):
-    """Random forest sobre residuos ARIMA sin fuga de información."""
+    """Random forest sobre residuos ARIMA, sin usar información futura.
+
+    El corrector aprende la dinámica de los residuos a un paso del ARIMA
+    sobre el tramo de entrenamiento. En la fase de prueba, la predicción
+    para el objetivo situado en t+h se construye desde el origen t
+    usando exclusivamente información disponible en t:
+
+    - la cola de residuos realizados contiene los residuos de
+      entrenamiento más los residuos a un paso de los orígenes de prueba
+      anteriores a t, calculados como log(real/prediccion) del propio
+      ARIMA a horizonte 1 (el residuo del retorno que termina en t se
+      conoce en t, nunca después);
+    - a partir de esa cola, el bosque predice recursivamente los h
+      residuos siguientes realimentando SUS PROPIAS predicciones (nunca
+      valores realizados posteriores a t);
+    - la corrección aplicada al nivel previsto por el ARIMA es la
+      exponencial de la suma de esos h residuos predichos, coherente con
+      la reconstrucción del nivel por encadenamiento de log-retornos.
+
+    Esta formulación corrige la versión anterior del corrector, que al
+    actualizar la cola con retornos realizados de los objetivos previos
+    incorporaba, para h > 1, observaciones posteriores al origen de la
+    predicción.
+    """
     from sklearn.ensemble import RandomForestRegressor
 
     res = {h: {} for h in horizontes}
@@ -294,33 +357,41 @@ def hibrido_arima_rf(res_arima, residuos, horizontes=HORIZONTES, k=6):
             min_samples_leaf=2,
         ).fit(Xr, yr)
 
+        # Residuos a un paso realizados en el tramo de prueba: el
+        # elemento j corresponde al origen t_j = i_va + j y se conoce en
+        # t_j + 1, de modo que en el origen t_i solo son observables los
+        # j < i (véase el uso de resid_test[:i] más abajo).
+        real1, pred1 = res_arima[1].get(distrito, (np.array([]), np.array([])))
+        if len(real1) and len(pred1):
+            resid_test = np.log(np.clip(real1, EPS, None) /
+                                np.clip(pred1, EPS, None))
+        else:
+            resid_test = np.array([])
+
         for h in horizontes:
             real, pred_a = res_arima[h][distrito]
             if len(real) == 0 or len(pred_a) == 0:
                 res[h][distrito] = (real, pred_a)
                 continue
 
-            # El RF predice el residuo (en log-retorno) de cada punto de
-            # test a partir de los k residuos previos, de forma rodante:
-            # tras cada punto se incorpora el residuo real observado, no
-            # la predicción, para no acumular error. La corrección se
-            # aplica a cada punto de forma independiente (sin cumsum),
-            # escalada por el nivel de precio del ARIMA en ese punto.
-            cola = list(r[-k:])
-            correccion = np.empty(len(pred_a))
+            pred = np.empty(len(pred_a))
             for i in range(len(pred_a)):
-                r_hat = float(rf.predict(np.array(cola[-k:])[None, :])[0])
-                correccion[i] = r_hat
-                # Residuo real aproximado: log-retorno realizado menos el
-                # previsto por el ARIMA entre el punto anterior y este.
-                if i > 0:
-                    ret_real = np.log(max(real[i], EPS) /
-                                      max(real[i - 1], EPS))
-                    cola.append(ret_real)
-                else:
+                # Residuos conocidos en el origen t_i: entrenamiento
+                # más los residuos a un paso de los orígenes anteriores.
+                conocidos = np.concatenate(
+                    [r, resid_test[:min(i, len(resid_test))]]
+                )
+                cola = list(conocidos[-k:])
+                # Predicción recursiva de los h residuos siguientes,
+                # realimentando las propias predicciones del bosque.
+                correccion = 0.0
+                for _ in range(h):
+                    r_hat = float(
+                        rf.predict(np.array(cola[-k:])[None, :])[0]
+                    )
+                    correccion += r_hat
                     cola.append(r_hat)
-            # Corrección multiplicativa punto a punto (sin acumulación).
-            pred = pred_a * np.exp(correccion)
+                pred[i] = pred_a[i] * np.exp(correccion)
             res[h][distrito] = (real, pred)
 
     return res
@@ -384,7 +455,7 @@ def mape_por_distrito(res_h):
     return {d: mape(y, yh) for d, (y, yh) in res_h.items() if len(y)}
 
 
-def main(rapido=False, k=VENTANA):
+def main(rapido=False, k=VENTANA, incluir_validacion=False):
     np.random.seed(SEED)
     panel = cargar_panel()
     if rapido:
@@ -404,7 +475,8 @@ def main(rapido=False, k=VENTANA):
     lb.to_csv(RESULTS / "ljung_box_distritos.csv", index=False)
 
     print("LSTM sobre el panel...")
-    res_lstm = red_sobre_panel(panel, "lstm", k, epocas=epocas)
+    res_lstm = red_sobre_panel(panel, "lstm", k, epocas=epocas,
+                               incluir_validacion=incluir_validacion)
     print("Híbrido ARIMA + RF...")
     res_hib = hibrido_arima_rf(res_arima, residuos)
 
@@ -439,5 +511,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--rapido", action="store_true")
     ap.add_argument("--ventana", type=int, default=VENTANA)
+    ap.add_argument(
+        "--incluir-validacion", action="store_true",
+        help="Reentrena la LSTM con el tramo de validación incluido "
+             "(experimento de sensibilidad a la asimetría de "
+             "información frente al ARIMA rodante)."
+    )
     args = ap.parse_args()
-    main(rapido=args.rapido, k=args.ventana)
+    main(rapido=args.rapido, k=args.ventana,
+         incluir_validacion=args.incluir_validacion)

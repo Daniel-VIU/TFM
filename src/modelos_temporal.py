@@ -21,6 +21,7 @@ Uso:
 Genera en results/:
     temporal_metricas.csv          (promedio por modelo y horizonte)
     temporal_por_distrito.csv      (MAPE por distrito, modelo, horizonte 1)
+    ljung_box_distritos.csv        (contraste de Ljung-Box por distrito)
 """
 
 import argparse
@@ -326,6 +327,39 @@ def hibrido_arima_rf(res_arima, residuos, horizontes=HORIZONTES, k=6):
 
 
 # ---------------------------------------------------------------------------
+# Diagnóstico: contraste de Ljung-Box sobre los residuos del ARIMA
+# ---------------------------------------------------------------------------
+
+def tabla_ljung_box(residuos, retardos=12, alfa=0.05):
+    """Contraste de Ljung-Box por distrito sobre los residuos ARIMA.
+
+    Recibe el diccionario de residuos de entrenamiento que devuelve
+    ``arima_por_distrito`` (los mismos sobre los que se entrena el
+    corrector del híbrido) y evalúa el estadístico Q acumulado hasta
+    ``retardos`` (12 por defecto: un año completo en datos mensuales).
+    Devuelve un DataFrame con el estadístico, el p-valor y si la serie
+    es compatible con ruido blanco al nivel ``alfa``.
+    """
+    from statsmodels.stats.diagnostic import acorr_ljungbox
+
+    filas = []
+    for distrito, r in residuos.items():
+        r = np.asarray(r, dtype=float)
+        if len(r) <= retardos + 1:
+            continue
+        lb = acorr_ljungbox(r, lags=[retardos])
+        q = float(lb["lb_stat"].iloc[0])
+        p = float(lb["lb_pvalue"].iloc[0])
+        filas.append({"Distrito": distrito, "n": len(r),
+                      f"Q({retardos})": round(q, 2),
+                      "p-valor": round(p, 3),
+                      "Ruido blanco": p > alfa})
+
+    tabla = pd.DataFrame(filas).sort_values("Distrito").reset_index(drop=True)
+    return tabla
+
+
+# ---------------------------------------------------------------------------
 # Orquestación y agregación
 # ---------------------------------------------------------------------------
 
@@ -361,6 +395,14 @@ def main(rapido=False, k=VENTANA):
 
     print("ARIMA por serie...")
     res_arima, residuos = arima_por_distrito(panel)
+
+    print("Contraste de Ljung-Box sobre los residuos...")
+    lb = tabla_ljung_box(residuos)
+    n_rb = int(lb["Ruido blanco"].sum())
+    print(f"  Ruido blanco (p > 0.05): {n_rb} de {len(lb)} distritos")
+    RESULTS.mkdir(exist_ok=True)
+    lb.to_csv(RESULTS / "ljung_box_distritos.csv", index=False)
+
     print("LSTM sobre el panel...")
     res_lstm = red_sobre_panel(panel, "lstm", k, epocas=epocas)
     print("Híbrido ARIMA + RF...")

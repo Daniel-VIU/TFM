@@ -153,12 +153,33 @@ def arima_por_distrito(panel, horizontes=HORIZONTES, orden=(1, 0, 4)):
 # Modelos 2 y 3: LSTM y CNN-LSTM sobre el panel conjunto
 # ---------------------------------------------------------------------------
 
+def _fijar_semillas_tf():
+    """Reproducibilidad completa de TensorFlow/Keras.
+
+    ``tf.keras.utils.set_random_seed`` fija a la vez las semillas de
+    ``random``, NumPy y TensorFlow (inicialización de pesos, barajado de
+    lotes y dropout). ``enable_op_determinism`` obliga además a usar
+    núcleos deterministas: sin ello, el paralelismo interno de TF hace
+    que las reducciones en coma flotante se acumulen en orden distinto
+    en cada ejecución y los resultados varíen aunque todas las semillas
+    estén fijadas. El coste es un entrenamiento algo más lento.
+    """
+    import tensorflow as tf
+
+    tf.keras.utils.set_random_seed(SEED)
+    try:
+        tf.config.experimental.enable_op_determinism()
+    except AttributeError:
+        # Versiones de TensorFlow anteriores a 2.9: sin determinismo de
+        # núcleos, puede quedar una variabilidad residual mínima.
+        pass
+
+
 def construir_red(tipo, k, unidades=24):
     """Arquitecturas recurrentes con regularización ligera."""
     import tensorflow as tf
     from tensorflow.keras import layers
 
-    tf.random.set_seed(SEED)
     entrada = layers.Input(shape=(k, 1))
     x = entrada
 
@@ -237,6 +258,7 @@ def red_sobre_panel(panel, tipo, k, horizontes=HORIZONTES, epocas=150,
     Xva = np.concatenate(Xva)[..., None]
     yva = np.concatenate(yva)
 
+    _fijar_semillas_tf()
     modelo = construir_red(tipo, k)
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
@@ -265,6 +287,7 @@ def red_sobre_panel(panel, tipo, k, horizontes=HORIZONTES, epocas=150,
         ep_opt = int(np.argmin(historia.history["val_loss"])) + 1
         print(f"    reentrenamiento con validación incluida "
               f"({ep_opt} épocas)")
+        _fijar_semillas_tf()          # reentrenamiento también reproducible
         modelo = construir_red(tipo, k)
         modelo.fit(
             np.concatenate([Xtr, Xva]),

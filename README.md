@@ -8,9 +8,12 @@ Series Temporales"*.
 
 ```
 ├── data/
-│   ├── raw/          # datos originales (no incluidos, ver abajo)
+│   ├── raw/          # datos originales
 │   └── processed/    # datos generados por el pipeline
 ├── results/          # tablas de métricas generadas
+└── memoria/
+│   ├── Images/    # imagenes generadas para la memoria         
+│
 └── src/
     ├── preparacion_datos.py    # limpieza idealista18 y panel de distritos
     ├── graficas_eda.py         # figuras del análisis exploratorio
@@ -41,6 +44,9 @@ python -m src.modelos_transversal
 
 # 3. Formulación temporal (horizontes 1, 3, 6 y 12 meses)
 python -m src.modelos_temporal
+
+# 4. Graficas
+python -m src.graficas_eda
 ```
 
 Añadir `--rapido` a los módulos de modelos para una comprobación sobre

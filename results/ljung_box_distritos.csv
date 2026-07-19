@@ -1,0 +1,22 @@
+Distrito,n,Q(12),p-valor,Ruido blanco
+Arganzuela,155,17.45,0.133,True
+Barajas,151,19.37,0.08,True
+Carabanchel,160,14.66,0.261,True
+Centro,159,29.59,0.003,False
+Chamartín,156,19.94,0.068,True
+Chamberí,154,13.18,0.356,True
+Ciudad Lineal,158,13.24,0.352,True
+Fuencarral,157,16.27,0.179,True
+Hortaleza,156,7.29,0.838,True
+Latina,155,12.28,0.424,True
+Moncloa,157,28.73,0.004,False
+Moratalaz,140,10.13,0.605,True
+Puente de Vallecas,158,14.78,0.254,True
+Retiro,153,20.29,0.062,True
+Salamanca,155,9.02,0.701,True
+San Blas,157,2.03,0.999,True
+Tetuán,160,18.27,0.108,True
+Usera,156,10.05,0.612,True
+Vicálvaro,136,5.93,0.92,True
+Villa de Vallecas,151,10.51,0.572,True
+Villaverde,154,6.56,0.885,True

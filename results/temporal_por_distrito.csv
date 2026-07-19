@@ -1,0 +1,22 @@
+Distrito,ARIMA,LSTM,ARIMA + RF
+Tetuán,0.758,2.271,0.834
+Chamartín,0.812,4.092,0.804
+Chamberí,0.881,4.083,0.812
+Fuencarral,0.889,2.408,1.088
+Arganzuela,0.903,1.797,0.901
+Usera,0.905,2.29,0.9
+Centro,0.948,1.185,0.938
+Carabanchel,0.95,2.058,0.929
+Moncloa,0.962,4.953,0.977
+Salamanca,1.0,7.541,0.881
+Ciudad Lineal,1.026,2.049,0.886
+Latina,1.092,2.994,1.135
+Retiro,1.138,5.292,1.263
+Hortaleza,1.145,1.634,1.047
+Puente de Vallecas,1.206,2.599,1.107
+San Blas,1.282,2.227,1.275
+Moratalaz,1.323,3.621,1.324
+Villaverde,1.655,2.998,1.701
+Villa de Vallecas,1.67,1.686,1.667
+Vicálvaro,1.755,2.824,1.7
+Barajas,2.175,2.254,2.262

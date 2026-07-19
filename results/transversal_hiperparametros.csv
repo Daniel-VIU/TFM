@@ -1,0 +1,3 @@
+Modelo,max_features,n_estimators,learning_rate,max_depth
+Random forest,0.3333333333333333,500,,
+Gradient boosting,,500,0.1,5.0

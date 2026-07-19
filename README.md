@@ -12,7 +12,7 @@ Series Temporales"*.
 │   └── processed/    # datos generados por el pipeline
 ├── results/          # tablas de métricas generadas
 └── memoria/
-│   ├── Images/    # imagenes generadas para la memoria         
+│   ├── Images/       # imagenes generadas para la memoria         
 │
 └── src/
     ├── preparacion_datos.py    # limpieza idealista18 y panel de distritos
